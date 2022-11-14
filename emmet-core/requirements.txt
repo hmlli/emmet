@@ -6,5 +6,5 @@ typing-extensions==4.4.0
 seekpath==2.0.1
 setuptools-scm==7.0.5
 robocrys==0.2.7
-matminer==0.7.8
+matminer==0.8.0
 pymatgen-analysis-diffusion==2022.7.21
