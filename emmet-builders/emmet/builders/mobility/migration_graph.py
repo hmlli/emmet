@@ -6,6 +6,7 @@ from emmet.builders.utils import get_hop_cutoff
 from pymatgen.apps.battery.insertion_battery import InsertionElectrode
 from pymatgen.analysis.diffusion.neb.full_path_mapper import MigrationGraph
 from emmet.core.utils import jsanitize
+from emmet.builders.mobility.utils import get_base_cse_from_non_base
 
 
 class MigrationGraphBuilder(MapBuilder):
@@ -45,6 +46,12 @@ class MigrationGraphBuilder(MapBuilder):
         ie = InsertionElectrode.from_dict(item["electrode_object"])
         entries = ie.get_all_entries()
         wi_entry = ie.working_ion_entry
+
+        # --------modifying buidler to be compatible with hl's mg_feb23 data---------
+        # add a base structure cse to variable entries so that entries contain an empty host structure
+        if ie.working_ion.symbol in ie.fully_charged_entry.structure.composition:
+            empty_host_cse = get_base_cse_from_non_base(item["host_structure"], ie)
+            entries.append(empty_host_cse)
 
         # get migration graph structure
         structs = MigrationGraph.get_structure_from_entries(entries, wi_entry)
