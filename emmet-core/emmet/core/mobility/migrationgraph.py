@@ -3,10 +3,15 @@ from typing import List, Union, Dict, Tuple, Sequence, Optional
 
 from pydantic import Field
 import numpy as np
+import copy
+import logging
 from emmet.core.base import EmmetBaseModel
+from emmet.core.vasp.task_valid import TaskState
 from pymatgen.core import Structure
 from pymatgen.analysis.structure_matcher import StructureMatcher
 from pymatgen.entries.computed_entries import ComputedEntry, ComputedStructureEntry
+from pymatgen.analysis.diffusion.utils.edge_data_from_sc import add_edge_data_from_sc
+from atomate2.common.schemas.neb import NebPathwayResult
 
 try:
     from pymatgen.analysis.diffusion.neb.full_path_mapper import MigrationGraph
@@ -97,6 +102,16 @@ class MigrationGraphDoc(EmmetBaseModel):
     insert_coords_combo: Optional[List[str]] = Field(
         None,
         description="A list of combinations 'a+b' to designate hops in the supercell. Each combo should correspond to one unique hop in MigrationGraph.",  # noqa: E501
+    )
+
+    paths_summary: Optional[Dict[int, List]] = Field(
+        None,
+        description="A dictionary of ranked intercalation pathways given cost (e.g. migration barrier from transition state calcs) of each unique_hop.",
+    )
+
+    migration_graph_w_cost: Optional[MigrationGraph] = Field(
+        None,
+        description="MigrationGraph instance that contains cost (e.g. from NEB) information",
     )
 
     @classmethod
@@ -357,6 +372,7 @@ class MigrationGraphDoc(EmmetBaseModel):
 
         return f"{sc_iindex}+{sc_eindex}", ordered_sc_site_list
 
+    @staticmethod
     def get_distinct_hop_sites(
         inserted_ion_coords: List[str], insert_coords_combo: List
     ) -> Tuple[List, List[str], Dict]:
@@ -389,3 +405,94 @@ class MigrationGraphDoc(EmmetBaseModel):
             combo_mapping[dis_combo] = one_combo
 
         return dis_sites_list, dis_combo_list, combo_mapping
+
+    @staticmethod
+    def get_paths_summary_with_neb_res(
+        mg: MigrationGraph, npr: NebPathwayResult
+    ) -> Tuple[Dict[int, List], MigrationGraph]:
+        """
+        This is a post-processing function that matches the results of transition state cals (NEB or ApproxNEB)
+        and unique_hops in the MigrationGraph, and then outputs a ranked list according to the calculated barrier
+        """
+        energy_struct_info = MigrationGraphDoc._get_energy_struct_info(npr)
+        mg_new = copy.deepcopy(mg)
+
+        for info in energy_struct_info.values():
+            try:
+                add_edge_data_from_sc(
+                    mg_new,
+                    i_sc=info["input_endpoints"][0],
+                    e_sc=info["input_endpoints"][-1],
+                    data_array=info,
+                    key="energy_struct_info",
+                )
+            except RuntimeError as e:
+                logging.warning(f"{e} occured to during matching")
+
+        unmatched_uhops = []
+        failed_neb_uhops = []
+
+        for k, v in mg_new.unique_hops.items():
+            # if a unique_hop failed to match with an NEB hops calc (no symmetry match, missing calc, etc.)
+            # the cost is set to infinity.
+            # if a unique_hops matches to an NEB hop in the FAILED state
+            # cost is set to the insertion energy diff (barrier from NebResult)
+            # but the failed state is explicitly stated in paths_summary
+            if "energy_struct_info" not in v:
+                cost, hop_key, state = float("inf"), "", "unmatched"
+                unmatched_uhops.append(k)
+            else:
+                state = v["energy_struct_info"]["state"]
+                if state == TaskState.FAILED:
+                    failed_neb_uhops.append(k)
+                cost, hop_key = (
+                    v["energy_struct_info"]["barrier"],
+                    v["energy_struct_info"]["hop_key"],
+                )
+            mg.add_data_to_similar_edges(
+                target_label=v["hop_label"],
+                data={"cost": cost, "hop_key": hop_key, "match_state": state},
+            )
+
+        logging.warning(
+            f"The following unique hops have not matched: {unmatched_uhops}"
+        )
+        logging.warning(
+            f"The following unique_hops matched but the corresponding calculation "
+            f"is in the FAILED state: {failed_neb_uhops}"
+        )
+
+        paths = list(mg.get_path())
+        paths_summary = {}
+        for one_path in paths:
+            path_summary = []
+            for one_hop in one_path[1]:
+                hop_summary = {
+                    key: value
+                    for key, value in one_hop.items()
+                    if key
+                    in ["hop_label", "hop_key", "hop_distance", "cost", "match_state"]
+                }
+                path_summary.append(hop_summary)
+            paths_summary[one_path[0]] = path_summary
+
+        return paths_summary, mg_new
+
+    @staticmethod
+    def _get_energy_struct_info(npr: NebPathwayResult) -> Dict:
+        """
+        This is a helper function that converts results in NebPathWayResult into
+        an info dict to be inserted into unique_hops of MigrationGraph
+        """
+        energy_struct_info = {}
+        for hop_key, data in npr.hops.items():
+            energy_struct_info[hop_key] = {
+                "hop_key": hop_key,
+                "barrier": max(data.forward_barrier, data.reverse_barrier),
+                "energies": data.energies,
+                "state": data.state,
+                "calc_metadata": data.metadata,
+                "input_endpoints": [data.initial_images[0], data.initial_images[-1]],
+                "output_structs": data.images,
+            }
+        return energy_struct_info
