@@ -106,7 +106,7 @@ class MigrationGraphDoc(EmmetBaseModel):
 
     paths_summary: Optional[Dict[int, List]] = Field(
         None,
-        description="A dictionary of ranked intercalation pathways given cost (e.g. migration barrier from transition state calcs) of each unique_hop.",
+        description="A dictionary of ranked intercalation pathways given cost (e.g. migration barrier from transition state calcs) of each unique_hop.",  # noqa: E501
     )
 
     migration_graph_w_cost: Optional[MigrationGraph] = Field(
@@ -166,7 +166,7 @@ class MigrationGraphDoc(EmmetBaseModel):
                     minmax_num_atoms,
                     coords_list,
                     combo,
-                ) = MigrationGraphDoc.generate_sc_fields(
+                ) = cls.generate_sc_fields(
                     mg=migration_graph,
                     min_length_sc=kwargs["min_length_sc"],
                     minmax_num_atoms=kwargs["minmax_num_atoms"],
@@ -190,6 +190,23 @@ class MigrationGraphDoc(EmmetBaseModel):
                 raise TypeError(
                     "Please make sure to have kwargs min_length_sc and minmax_num_atoms if populate_sc_fields is set to True."  # noqa: E501
                 )
+
+    @classmethod
+    def augment_from_mgd_and_npr(
+        cls, mgd: "MigrationGraphDoc", npr: NebPathwayResult
+    ) -> "MigrationGraphDoc":
+        """
+        This class method takes an existing MigrationGraphDoc and augments it by populating
+        the paths_summary and migration_graph_w_cost fields with transition state data from
+        NebPathwayResult.
+        """
+        mgd_w_cost = mgd.model_copy(deep=True)
+        paths_summary, mg_new = cls.get_paths_summary_with_neb_res(
+            mg=mgd_w_cost.migration_graph, npr=npr
+        )
+        mgd_w_cost.paths_summary = paths_summary
+        mgd_w_cost.migration_graph_w_cost = mg_new
+        return mgd_w_cost
 
     @staticmethod
     def generate_sc_fields(
